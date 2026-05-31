@@ -12,7 +12,7 @@ for nif_file in nif_files:
     bpy.ops.import_scene.mw(
         filepath=str(nif_file),
         use_existing_materials = True,
-        ignore_animations = True,        
+        ignore_animations = True, 
         ignore_armatures = True,
         ignore_billboard_nodes = True,
         ignore_particle_nodes = False,      
@@ -23,6 +23,7 @@ for nif_file in nif_files:
         filter_best_lod = True,
         use_texture_fallbacks = True,
         use_texture_path_in_material_name = False,
+        normalize_names = True,
         always_use_file_name_for_root_name = False,
         proxy_mode = False
     )
