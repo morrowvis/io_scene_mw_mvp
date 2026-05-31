@@ -56,6 +56,7 @@ class ImportScene(bpy.types.Operator, ImportHelper):
     ignore_collision_nodes: bpy.props.BoolProperty(default=False, options={"HIDDEN"})
     ignore_custom_normals: bpy.props.BoolProperty(default=False, options={"HIDDEN"})
     ignore_animations: bpy.props.BoolProperty(default=False, options={"HIDDEN"})
+    normalize_names: bpy.props.BoolProperty(default=True, options={"HIDDEN"})
     ignore_armatures: bpy.props.BoolProperty(default=False, options={"HIDDEN"})
     ignore_billboard_nodes: bpy.props.BoolProperty(default=False, options={"HIDDEN"})
     ignore_particle_nodes: bpy.props.BoolProperty(default=False, options={"HIDDEN"})
