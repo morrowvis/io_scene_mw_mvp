@@ -23,9 +23,9 @@ other_axis_correction = np.array(axis_conversion('Y', 'Z', '-Z', '-Y').to_4x4(),
 other_axis_correction_inverse = la.inv(other_axis_correction)
 
 def _normalize_prefix(filename, max_length=3):
-    # Lowercase prefix of up to max_length letters before an underscore
+    # Lowercase prefix of up to max_length letters before an underscore or space
     for n in range(1, max_length + 1):
-        if len(filename) >= n + 1 and filename[n] == '_' and filename[:n].isalpha():
+        if len(filename) >= n + 1 and filename[n] in ('_', ' ') and filename[:n].isalpha():
             return filename[:n].lower() + filename[n:]
     return filename
 
@@ -105,6 +105,7 @@ class Importer:
     use_texture_fallbacks = True
     use_texture_path_in_material_name = False
     normalize_prefix = True
+    normalize_prefix_root = True
     normalize_prefix_max_length = 3
     always_use_file_name_for_root_name = False
     proxy_mode = False
@@ -580,7 +581,7 @@ class SceneNode:
 
     @property
     def name(self):
-        return sanitize_name(self.source.name, normalize_prefix=(self.parent is not None and self.importer.normalize_prefix), normalize_prefix_max_length=self.importer.normalize_prefix_max_length)
+        return sanitize_name(self.source.name, normalize_prefix=(self.importer.normalize_prefix and (self.parent is not None or self.importer.normalize_prefix_root)), normalize_prefix_max_length=self.importer.normalize_prefix_max_length)
 
     @property
     def bone_name(self):
