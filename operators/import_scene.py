@@ -67,6 +67,7 @@ class ImportScene(bpy.types.Operator, ImportHelper):
     use_texture_fallbacks: bpy.props.BoolProperty(default=True, options={"HIDDEN"})
     use_texture_path_in_material_name: bpy.props.BoolProperty(default=False, options={"HIDDEN"})
     normalize_prefix: bpy.props.BoolProperty(default=True, options={"HIDDEN"})
+    normalize_prefix_root: bpy.props.BoolProperty(default=True, options={"HIDDEN"})
     always_use_file_name_for_root_name: bpy.props.BoolProperty(default=False, options={"HIDDEN"})
     proxy_mode: bpy.props.BoolProperty(default=False, options={"HIDDEN"})
     
