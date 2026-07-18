@@ -561,9 +561,14 @@ class Importer:
             present = [c for c in children if c is not None]
             return present[:1] if len(present) > 1 else children
 
-        # Smallest near-range is the detailed level; on a tie prefer the one
-        # visible over the longer distance (a far == near level never renders).
-        best = min(paired, key=lambda p: (p[1][0], -p[1][1]))[0]
+        # Drop levels that can never render (far <= near), e.g. dr_mist_lava.nif.
+        renderable = [p for p in paired if p[1][1] > p[1][0]] or paired
+
+        # The detailed level is the one shown nearest the camera: smallest near,
+        # then smallest far. Ranges are normally contiguous so near alone decides;
+        # far breaks ties where several levels start at 0 (Tamriel_Data lanterns
+        # have 0-500 detailed / 0-4000 distant, and larger-far would invert it).
+        best = min(renderable, key=lambda p: (p[1][0], p[1][1]))[0]
         return [best]
 
     def resolve_nodes(self, ni_roots, parent=None):
