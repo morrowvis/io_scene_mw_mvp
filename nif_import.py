@@ -118,6 +118,7 @@ class Importer:
         self.mesh_data = {}
         self.history = collections.defaultdict(set)
         self.armatures = collections.defaultdict(set)
+        self.bone_to_armature = {}  # bone source -> the armature root that owns it
         self.colliders = collections.defaultdict(set)
         self.active_collection = bpy.context.view_layer.active_layer_collection.collection
         self.filepath = pathlib.Path(filepath)
@@ -135,14 +136,7 @@ class Importer:
         # fix transforms
         if self.discard_root_transforms:
             if self.preserve_root_scale:
-                # Drop the root's world placement (translation + rotation) but
-                # keep its per-axis scale. Baked actor exports encode the actor's
-                # size on the root node as Morrowind's race weight/height model:
-                # a non-uniform scale where X/Y is build/weight and Z is height.
-                # Averaging it to a single factor (e.g. cube root) mixes width
-                # into height and gets relative heights wrong, so keep all three
-                # axes. Normal asset meshes have root scale 1.0, so this stays
-                # equivalent to zeroing the matrix.
+                # drop placement but keep per-axis scale (actor race weight/height)
                 scale = decompose(np.asarray(data.root.matrix, dtype="<f"))[2]
                 data.root.matrix = compose(np.zeros(3), np.eye(3), scale)
             else:
@@ -260,10 +254,7 @@ class Importer:
            a positive determinant). Bake the mirror into the matrix so
            the geometry imports mirrored.
         """
-        # bake implicit BSMirroredNode mirroring: the engine applies a
-        # uniform scale of -1 (point reflection) to these nodes at runtime;
-        # the file stores det=+1 matrices. Verified empirically against an
-        # in-game skin-deform reference export (see CLAUDE.md).
+        # bake the implicit -1 point reflection; the file stores det=+1 matrices
         mirror = np.diag((-1.0, -1.0, -1.0, 1.0)).astype("<f")
         for obj in data.objects_of_type(nif.BSMirroredNode):
             if la.det(np.asarray(obj.matrix)[:3, :3]) > 0:
@@ -373,19 +364,21 @@ class Importer:
             return result
 
         def freezable(obj):
-            # Only freeze uniform scale that sits inside animated content
-            # (skeletons): that is where Blender's orthonormal rest bones
-            # break the fcurve math. Non-uniform scale (NPC race
-            # weight/height and the inverse baked into skinned part
-            # nodes) and scale on purely static subtrees import correctly
-            # as plain object scale -- leave those exactly as before.
+            # only uniform scale inside animated content; see CLAUDE.md
             if abs(obj.scale * embedded_scale(obj) - 1.0) <= 1e-4:
                 return False
             if not is_uniform(obj):
                 if subtree_animated(obj):
                     print(f"Warning: non-uniform scale on animated node '{obj.name}' cannot be frozen")
                 return False
-            return subtree_animated(obj)
+            if subtree_animated(obj):
+                return True
+            # a skinned mesh's own scale leaks into the bind poses; freeze it too
+            skin = getattr(obj, "skin", None)
+            if skin and getattr(skin, "bones", None):
+                if any(b is not None and subtree_animated(b) for b in skin.bones):
+                    return True
+            return False
 
         roots = [root for root in data.roots if isinstance(root, nif.NiNode)]
         if not any(
@@ -422,11 +415,7 @@ class Importer:
                 if kfd is not None and len(kfd.scales.keys):
                     svals = kfd.scales.keys[:, 1]
                     if float(svals.max() - svals.min()) < 1e-3:
-                        # Constant scale animation (e.g. the minotaur's 'Root
-                        # Bone': static rotation embeds 2.0 AND scale keys hold
-                        # a constant 2.0 -- the same scale expressed twice).
-                        # Fold the animated value into the static freeze and
-                        # drop the keys, so the scale is applied exactly once.
+                        # constant scale keys: fold into the freeze, apply once
                         s_anim = float(svals[0])
                         kfd.scales.keys = kfd.scales.keys[:0]
                         if abs(s_anim - own) > 1e-3:
@@ -439,9 +428,7 @@ class Importer:
                 elif abs(embed - 1.0) > 1e-4:
                     rot = kfd.rotations if kfd is not None else None
                     if rot is not None and (rot.euler_data or len(rot.keys)):
-                        # rotation-animated with no scale keys: the engine
-                        # replaces the rotation while animating, so the
-                        # embedded scale never renders -- discard it
+                        # animated rotation overwrites it, so it never renders
                         print(f"Discarding junk rotation scale {embed:.3f} on animated node '{node.name}'")
                         own = node.scale
                     else:
@@ -480,15 +467,8 @@ class Importer:
                 if child is not None and isinstance(child, nif.NiAVObject):
                     freeze(child, 1.0)
 
-        # Rescale skin bind matrices to match the frozen bones (the
-        # world-invariant counterpart of the freeze: bones lost factor
-        # f_bone from their matrices, meshes gained f_mesh in their
-        # vertex data). Then normalize any residual scale left in the
-        # binds into the mesh's bind-space vertex data -- assets differ
-        # in where they put the scale (the minotaur's binds carry the
-        # inverse of the skeleton scale; the seacrab's binds are unit
-        # with the scale only on the skin root), and the bind-pose
-        # machinery requires orthonormal binds either way.
+        # rescale skin binds to match the frozen bones, then normalize any
+        # residual into the vertex data (bind poses must stay orthonormal)
         skin_seen = {}  # id(geometry data) -> residual factor baked
         for mesh in data.objects_of_type(nif.NiGeometry):
             skin = getattr(mesh, "skin", None)
@@ -546,13 +526,9 @@ class Importer:
 
     @staticmethod
     def best_lod_children(lod_node, children):
-        # Keep only the highest-detail level of a NiLODNode. lod_levels pairs up
-        # index-for-index with children as (near, far); the level starting nearest
-        # the camera is the detailed one. Children may be any NiAVObject (a NiNode
-        # wrapping several shapes, or a bare NiTriShape), so type is not a filter.
+        # keep the highest-detail level; lod_levels is (near, far) per child
         levels = lod_node.lod_levels
-        # Pair by ORIGINAL index: a null child still consumes a level slot, so
-        # compacting the list before indexing lod_levels would misalign them.
+        # pair by ORIGINAL index: a null child still consumes a level slot
         paired = [(c, levels[i]) for i, c in enumerate(children)
                   if c is not None and i < len(levels)]
 
@@ -564,10 +540,7 @@ class Importer:
         # Drop levels that can never render (far <= near), e.g. dr_mist_lava.nif.
         renderable = [p for p in paired if p[1][1] > p[1][0]] or paired
 
-        # The detailed level is the one shown nearest the camera: smallest near,
-        # then smallest far. Ranges are normally contiguous so near alone decides;
-        # far breaks ties where several levels start at 0 (Tamriel_Data lanterns
-        # have 0-500 detailed / 0-4000 distant, and larger-far would invert it).
+        # nearest level wins: smallest near, then smallest far to break ties
         best = min(renderable, key=lambda p: (p[1][0], p[1][1]))[0]
         return [best]
 
@@ -615,29 +588,49 @@ class Importer:
         return root_nodes
 
     def resolve_armatures(self):
+        """Build one armature per skeleton. A nested root joins the outer
+        skeleton as a bone; sibling roots get their own armatures."""
         if self.ignore_armatures:
             return
-        """ TODO
-            support for multiple skeleton roots
-        """
-        orphan_bones = self.armatures.pop(None, {})
 
-        # sort roots via heirarchy
-        roots = list(map(self.get, self.armatures))
-        roots.sort(key=lambda r: len([*r.parents]))
+        orphan_bones = self.armatures.pop(None, set())
+        root_sources = set(self.armatures)
+        if not root_sources:
+            return
 
-        # select the top-most root
-        root = roots[0].source
+        def group_key(source):
+            # outermost root at or above source (parents walks upward)
+            key = source
+            for parent in self.get(source).parents:
+                if parent.source in root_sources:
+                    key = parent.source
+            return key
+
+        groups = collections.defaultdict(set)
+        for source in root_sources:
+            key = group_key(source)
+            if key is not source:
+                groups[key].add(source)  # nested root becomes a bone
+            groups[key].update(self.armatures[source])
+
+        # orphan bones join the skeleton whose root is one of their ancestors
+        for bone in orphan_bones:
+            ancestry = {p.source for p in self.get(bone).parents}
+            for key in groups:
+                if key in ancestry:
+                    groups[key].add(bone)
+                    break
+
+        self.armatures.clear()
+        self.bone_to_armature = {}
+        for key, group_bones in groups.items():
+            self.armatures[key] = group_bones
+
+        for key in list(self.armatures):
+            self._resolve_skeleton(key)
+
+    def _resolve_skeleton(self, root):
         bones = self.armatures[root]
-
-        # collect all orphan bones
-        bones.update(orphan_bones)
-
-        # collect all others bones
-        for other_root in self.armatures.keys() - {root}:
-            other_bones = self.armatures.pop(other_root)
-            bones.add(other_root)
-            bones.update(other_bones)
 
         # only descendants of root
         root_node = self.get(root)
@@ -645,14 +638,11 @@ class Importer:
 
         # bail if no bones present
         if len(bones) == 0:
-            self.armatures.clear()
+            del self.armatures[root]
             return
 
         def validate_bone_chains():
-            # ensure all ancestors between each bone and the root are bones,
-            # and discard bones that are not descendants of the root at all
-            # (e.g. a second skeleton elsewhere in a cell export) so that
-            # scene-level nodes never get dragged into the armature
+            # promote ancestors up to the root; discard non-descendants
             for source in list(bones):
                 chain = []
                 for parent in self.get(source).parents:
@@ -665,18 +655,13 @@ class Importer:
                     print(f"Warning: '{source.name}' is not a descendant of "
                           f"'{root.name}' and will not become a bone")
 
-        # connect skin bones to the root before promoting animated
-        # descendants, so that root children which are merely ancestors
-        # of skin bones (e.g. the siltstrider's 'Movement' node, whose
-        # 'Body' subtree holds the rigid-animated legs) count as bones
+        # run first so ancestors of skin bones count before the promotion below
         validate_bone_chains()
 
         # consider any descendants which are animated to be bones
         # this is usually desired, and to not do so would mean we
         # have to fix the animations of any node who's transforms
         # are modified by a parent bone receiving axis correction
-        # (mirrored nodes are excluded: negative-scale bones would
-        # break matrix decomposition)
         for root_bone in filter(bones.__contains__, root.children):
             for child in root_bone.descendants():
                 if isinstance(child, nif.NiNode) and not isinstance(child, nif.BSMirroredNode):
@@ -688,15 +673,16 @@ class Importer:
 
         # bail if validation discarded everything
         if len(bones) == 0:
-            self.armatures.clear()
+            del self.armatures[root]
             return
 
         # order bones by heirarchy
         self.armatures[root] = dict.fromkeys(node.source for node in self.nodes if node.source in bones).keys()
 
-        # preserve bone pose matrices
+        # preserve bone pose matrices, and record the owning armature
         for node in self.iter_bones(root_node):
             node.matrix_posed = node.matrix_world
+            self.bone_to_armature[node.source] = root
 
         # send all bones to rest pose
         root.apply_bone_bind_poses()
@@ -713,41 +699,42 @@ class Importer:
         if self.ignore_armatures or not self.armatures:
             return
 
-        root = self.get_armature_node()
-        root_bone = next(self.iter_bones(root))
+        for root_source in list(self.armatures):
+            root = self.get(root_source)
+            try:
+                root_bone = next(self.iter_bones(root))
+            except StopIteration:
+                continue
 
-        # calculate corrected transformation matrix
-        t, r, s = decompose(root_bone.matrix_posed)
-        r = nif_utils.snap_rotation(r)
-        corrected_matrix = compose(t, r, s)
+            # calculate corrected transformation matrix
+            t, r, s = decompose(root_bone.matrix_posed)
+            r = nif_utils.snap_rotation(r)
+            corrected_matrix = compose(t, r, s)
 
-        # only do corrections if they are necessary
-        if np.allclose(root_bone.matrix_world, corrected_matrix, rtol=0, atol=1e-6):
-            return
+            # only do corrections if they are necessary
+            if np.allclose(root_bone.matrix_world, corrected_matrix, rtol=0, atol=1e-6):
+                continue
 
-        # correct the rest matrix of skinned meshes
-        inverse = la.inv(root_bone.matrix_world)
-        for node in self.get_skinned_meshes():
-            if root_bone not in node.parents:
-                node.matrix_world = corrected_matrix @ (inverse @ node.matrix_world)
+            # correct the rest matrix of this skeleton's skinned meshes only
+            inverse = la.inv(root_bone.matrix_world)
+            for node in self.skinned_meshes_for(root_source):
+                if root_bone not in node.parents:
+                    node.matrix_world = corrected_matrix @ (inverse @ node.matrix_world)
 
-        # correct the rest matrix of the root bone
-        root_bone.matrix_world = corrected_matrix
+            # correct the rest matrix of the root bone
+            root_bone.matrix_world = corrected_matrix
 
     def apply_axis_corrections(self):
         if self.ignore_armatures or not self.armatures:
             return
 
-        root = self.get_armature_node()
-        bones = list(self.iter_bones(root))
+        for root_source in list(self.armatures):
+            root = self.get(root_source)
+            self._apply_axis_corrections_one(root, list(self.iter_bones(root)))
 
-        # Aim each non-biped bone's corrected Y axis (the Blender bone
-        # axis) at the mean of its child bones, so bone sticks follow the
-        # limbs like NifSkope's joint lines -- custom rigs (minotaur,
-        # seacrab) have arbitrary bind axes and the fixed correction
-        # leaves their sticks pointing sideways. Purely a change of rest
-        # frame: the same per-bone correction feeds the animation
-        # conversion below, so poses and animations are unaffected.
+    def _apply_axis_corrections_one(self, root, bones):
+
+        # aim each non-biped bone's Y at its children so sticks follow the limbs
         for node in bones:
             if "Bip01" in node.name:
                 continue
@@ -814,19 +801,26 @@ class Importer:
 
             r = kf_controller.data.rotations
             if r.euler_data:
-                # Euler-keyed rotations expose no .values, so they would skip
-                # the corrections below and reach Blender in raw NIF space
-                # (mangling the animation exactly like unpromoted rigid nodes
-                # once did). Bones need quaternions anyway -- convert now so
-                # the standard correction path applies.
+                # euler keys expose no .values, so convert before correcting
                 r.convert_to_quaternions()
             if len(r.values):
                 # apply axis correction
                 axis_fix = nif_utils.quaternion_from_matrix(node.axis_correction)
                 r.values[:] = nif_utils.quaternion_mul(r.values, axis_fix)
-                # convert to pose space
-                to_posed = nif_utils.quaternion_from_matrix(posed_offset)
+                # convert to pose space; quaternion_from_matrix needs orthonormal
+                rotation_only = posed_offset
+                scale = la.norm(np.asarray(posed_offset)[:3, :3], axis=0)
+                if not np.allclose(scale, 1.0, rtol=0, atol=1e-6):
+                    rotation_only = np.array(posed_offset, dtype=np.float64)
+                    rotation_only[:3, :3] /= scale
+                to_posed = nif_utils.quaternion_from_matrix(rotation_only)
                 r.values[:] = nif_utils.quaternion_mul(to_posed, r.values)
+                # keep successive keys on one hemisphere, else Blender's
+                # componentwise interpolation swings the long way (a snap)
+                if len(r.values) > 1:
+                    dots = np.einsum("ij,ij->i", r.values[:-1], r.values[1:])
+                    flips = np.cumprod(np.where(dots < 0, -1.0, 1.0))
+                    r.values[1:] *= flips[:, None]
 
     def correct_bone_parenting(self):
         if self.ignore_armatures or not self.armatures:
@@ -842,8 +836,12 @@ class Importer:
         if not self.armatures:
             return
 
-        armature = self.get_armature_node()
+        # each skinned mesh is parented to its own skeleton's armature
         for node in self.get_skinned_meshes():
+            root_source = self.armature_root_for_mesh(node)
+            if root_source is None:
+                continue
+            armature = self.get(root_source)
             if node.parent != armature:
                 matrix_world = node.matrix_world
                 node.parent = armature
@@ -960,9 +958,26 @@ class Importer:
             return root_out
 
     def get_armature_node(self):
-        if self.ignore_armatures:
+        # first armature only; use armature_root_for_mesh to target a specific one
+        if self.ignore_armatures or not self.armatures:
             return None
-        return self.get(*self.armatures)
+        return self.get(next(iter(self.armatures)))
+
+    def armature_root_for_mesh(self, mesh_node):
+        """Root source of the skeleton that deforms this skinned mesh."""
+        skin = getattr(mesh_node.source, "skin", None)
+        if not (skin and getattr(skin, "bones", None)):
+            return None
+        for bone in skin.bones:
+            root_source = getattr(self, "bone_to_armature", {}).get(bone)
+            if root_source is not None:
+                return root_source
+        return None
+
+    def skinned_meshes_for(self, root_source):
+        for node in self.get_skinned_meshes():
+            if self.armature_root_for_mesh(node) is root_source:
+                yield node
 
     def get_skinned_meshes(self):
         if self.ignore_armatures:
@@ -1249,12 +1264,8 @@ class Armature(SceneNode):
             else:
                 deferred.append(bone)
 
-        # Bones without a usable child-derived length (childless bones, or
-        # bones whose children coincide with their head, e.g. Bip01 vs
-        # Bip01 Pelvis) get a modest display length. Never collapse a bone
-        # (or nudge a collapsed tail): that resets its rest orientation,
-        # which corrupts animations, as fcurve channels are expressed
-        # relative to the rest frame.
+        # fallback display length; never collapse a bone, it resets its rest
+        # orientation and corrupts the animation
         if deferred:
             valid = [b.length for b in bl_data.edit_bones if b not in deferred]
             fallback = float(np.median(valid)) if valid else 1.0
@@ -1270,13 +1281,18 @@ class Armature(SceneNode):
         if layer_collection:
             layer_collection.hide_viewport = was_collection_hidden
 
-        # assign node.output and apply pose transforms
+        # assign every pose BEFORE any animation: pose_bone.matrix solves
+        # against the parent's evaluated pose, so interleaving the two phases
+        # leaks spurious locations into the children (see CLAUDE.md)
         for node, name in bones.items():
             pose_bone = node.output = bl_object.pose.bones[name]
             # compute the armature-space matrix
             pose_bone.matrix = (root_inverse @ node.matrix_posed).T
             # TODO try not to call scene update
             bpy.context.view_layer.depsgraph.update()
+
+        # only once every pose is settled, attach the animations
+        for node, name in bones.items():
             # create animations, preserve poses
             node.animation.create()
             node.animation.set_mute(True)
@@ -1414,14 +1430,21 @@ class Mesh(SceneNode):
         bones = map(self.importer.get, self.source.skin.bones)
 
         # Make Armature
-        # The modifier must target the single armature that owns the skin
-        # bones; skin.root itself may be a plain empty in actor exports.
-        armature_node = self.importer.get_armature_node()
+        # route via the bones: skin.root may be a plain empty in actor exports
+        root_source = self.importer.armature_root_for_mesh(self)
+        armature_node = (self.importer.get(root_source) if root_source is not None
+                         else self.importer.get_armature_node())
+        if armature_node is None or armature_node.output is None:
+            return
         armature = ob.modifiers.new("", "ARMATURE")
         armature.object = armature_node.output.id_data
 
         # Vertex Weights
         for i, node in enumerate(bones):
+            if node.output is None:  # bone never became part of an armature
+                print(f"Warning: '{node.name}' is not in an armature; "
+                      f"skipping its weights on '{self.name}'")
+                continue
             vg = ob.vertex_groups.new(name=node.output.name)
 
             weights = vertex_weights[i]
