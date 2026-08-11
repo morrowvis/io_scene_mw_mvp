@@ -364,6 +364,10 @@ class Importer:
             return result
 
         def freezable(obj):
+            # negative scale is a stored reflection (BSMirroredNode), not a
+            # scale; freezing consumes it and loses the mirror
+            if obj.scale < 0:
+                return False
             # only uniform scale inside animated content; see CLAUDE.md
             if abs(obj.scale * embedded_scale(obj) - 1.0) <= 1e-4:
                 return False
@@ -662,11 +666,36 @@ class Importer:
         # this is usually desired, and to not do so would mean we
         # have to fix the animations of any node who's transforms
         # are modified by a parent bone receiving axis correction
+
+        # a BSMirroredNode cannot be a bone (it carries a reflection), so its
+        # opposite-side twin must not be either - promoting one of a Left/Right
+        # pair sends the two sides down different paths; see CLAUDE.md
+        mirrored = {n.name for n in root.descendants()
+                    if isinstance(n, nif.BSMirroredNode)}
+
+        def has_mirrored_twin(name):
+            for a, b in (("Left", "Right"), ("Right", "Left")):
+                if name.startswith(a) and (b + name[len(a):]) in mirrored:
+                    return True
+            return False
+
         for root_bone in filter(bones.__contains__, root.children):
             for child in root_bone.descendants():
-                if isinstance(child, nif.NiNode) and not isinstance(child, nif.BSMirroredNode):
-                    if child.controllers.find_type(nif.NiKeyframeController):
-                        bones.add(child)
+                if not isinstance(child, nif.NiNode):
+                    continue
+                if isinstance(child, nif.BSMirroredNode) or has_mirrored_twin(child.name):
+                    # a live capture leaves a dead single-key controller on these
+                    # attachment nodes; un-promoted it applies in the wrong space
+                    kf = child.controllers.find_type(nif.NiKeyframeController)
+                    if kf and kf.data and not (
+                        len(kf.data.rotations.keys) or kf.data.rotations.euler_data
+                        or len(kf.data.scales.keys)
+                        or len(kf.data.translations.keys) > 1
+                    ):
+                        child.controller = None
+                    continue
+                if child.controllers.find_type(nif.NiKeyframeController):
+                    bones.add(child)
 
         # validate all bone chains
         validate_bone_chains()
