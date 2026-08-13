@@ -212,15 +212,8 @@ class Importer:
 
     @staticmethod
     def discard_detached_skins(data):
-        """Strip skins that reference nodes outside the scene graph.
-
-        In-game "standard" NPC exports flatten the hierarchy into loose
-        world-baked trishapes but keep stale skin data pointing at
-        skeleton nodes that exist in the file only as detached objects.
-        Such skins cannot be resolved (no scene bones to bind to) and
-        would crash both import paths, so import those meshes as static
-        geometry instead.
-        """
+        """Strip skins that reference nodes outside the scene graph; those meshes
+        import as static geometry rather than crashing."""
         in_scene = set()
         for root in data.roots:
             in_scene.add(id(root))
@@ -238,22 +231,9 @@ class Importer:
                 mesh.skin = None
 
     def repair_scene(self, data):
-        """Fix up scene graphs produced by in-game actor/cell exporters.
-
-        Such files dump the live scene graph, which differs from regular
-        asset files in two ways this importer must account for:
-
-        1. Skinned body parts keep a skin root (e.g. 'Chest') that is NOT
-           an ancestor of the skin bones (which live under a sibling
-           'Bip01' node). The es3 bind pose machinery requires the skin
-           root to be a common ancestor, so repoint it to the nearest one
-           and update the skin offset matrix accordingly.
-
-        2. Left-side body parts are wrapped in BSMirroredNode, whose
-           mirroring is implicit in the node type (the matrix itself has
-           a positive determinant). Bake the mirror into the matrix so
-           the geometry imports mirrored.
-        """
+        """Fix up live scene graphs from in-game exporters: repoint skin roots
+        that are not ancestors of their bones, and bake BSMirroredNode's
+        implicit reflection into the matrix."""
         # bake the implicit -1 point reflection; the file stores det=+1 matrices
         mirror = np.diag((-1.0, -1.0, -1.0, 1.0)).astype("<f")
         for obj in data.objects_of_type(nif.BSMirroredNode):
@@ -304,29 +284,9 @@ class Importer:
 
     @staticmethod
     def apply_hierarchy_scales(data):
-        """Freeze non-root node scales into the hierarchy.
-
-        NIF nodes may carry a uniform scale, but Blender rest bones are
-        orthonormal, so any scale inside an armature silently breaks the
-        animation math: static matrices compensate, while fcurve values
-        come out in unscaled bone space and the pose drifts apart down
-        the chain.
-
-        Two flavors exist (e.g. the sky minotaur):
-        - scale embedded in a non-orthonormal rotation matrix. If the
-          node's rotation is keyframe-animated, the engine overwrites
-          the rotation while animating, so the embedded scale never
-          applies in game -- drop it. On static nodes it does apply --
-          treat it like a real scale.
-        - the actual scale field. The engine applies it to the whole
-          subtree, so push it down: child local translations and
-          keyframe translations scale by the inherited factor, and leaf
-          geometry absorbs the accumulated product into its vertex data.
-
-        World transforms are unchanged. Roots keep their scale (it
-        becomes Blender object scale, which is fine). Vanilla assets
-        have scale 1.0 everywhere, making this a no-op.
-        """
+        """Freeze non-root node scales into the hierarchy: Blender rest bones are
+        orthonormal, so scale left inside an armature breaks the animation math.
+        World transforms are unchanged; a no-op on vanilla assets."""
         import copy
 
         def embedded_scale(obj):
