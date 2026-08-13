@@ -368,7 +368,7 @@ class Importer:
             # scale; freezing consumes it and loses the mirror
             if obj.scale < 0:
                 return False
-            # only uniform scale inside animated content; see CLAUDE.md
+            # only uniform scale inside animated content
             if abs(obj.scale * embedded_scale(obj) - 1.0) <= 1e-4:
                 return False
             if not is_uniform(obj):
@@ -669,7 +669,7 @@ class Importer:
 
         # a BSMirroredNode cannot be a bone (it carries a reflection), so its
         # opposite-side twin must not be either - promoting one of a Left/Right
-        # pair sends the two sides down different paths; see CLAUDE.md
+        # pair sends the two sides down different paths
         mirrored = {n.name for n in root.descendants()
                     if isinstance(n, nif.BSMirroredNode)}
 
@@ -929,10 +929,17 @@ class Importer:
             return False
         return self.process_empty(node)
 
+    @staticmethod
+    def is_shadow_mesh(source):
+        """Shadow geometry: the NIF's own flag, else an anchored name."""
+        if getattr(source, "shadow", False):
+            return True
+        name = (source.name or "").lower()
+        return name.startswith("tri shadow") or name == "shadow"
+
     @process.register("NiTriShape")
     def process_mesh(self, node):
-        # Skip "Tri Shadow" nodes or nodes named exactly "shadow"
-        if self.ignore_tri_shadow and (node.name.lower().startswith("tri shadow") or node.name.lower() == "shadow"):
+        if self.ignore_tri_shadow and self.is_shadow_mesh(node.source):
             print(f"Skipping shadow mesh: {node.name}")
             return False
 
@@ -1312,7 +1319,7 @@ class Armature(SceneNode):
 
         # assign every pose BEFORE any animation: pose_bone.matrix solves
         # against the parent's evaluated pose, so interleaving the two phases
-        # leaks spurious locations into the children (see CLAUDE.md)
+        # leaks spurious locations into the children
         for node, name in bones.items():
             pose_bone = node.output = bl_object.pose.bones[name]
             # compute the armature-space matrix
