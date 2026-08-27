@@ -1,0 +1,6 @@
+# CRLF in every working tree; git still stores LF in the repository.
+# Windows-only game, Windows-only toolchain: CRLF is what every local tool produces by default.
+* text=auto eol=crlf
+*.nif binary
+*.dll binary
+*.7z binary
