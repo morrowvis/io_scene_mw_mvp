@@ -109,6 +109,7 @@ class Importer:
     normalize_prefix_root = True
     normalize_prefix_max_length = 3
     always_use_file_name_for_root_name = False
+    authored_rest_pose = True
     proxy_mode = False
     
     def __init__(self, filepath, config):
@@ -259,6 +260,17 @@ class Importer:
             skin = getattr(mesh, "skin", None)
             if not (skin and getattr(skin, "root", None) and getattr(skin, "bones", None)):
                 continue
+
+            # a live capture can bind skin.root to a same-named node elsewhere
+            # in the graph; the matrix is authored against the mesh's own
+            mesh_chain = ancestry(mesh)
+            if not any(n is skin.root for n in mesh_chain):
+                twin = next((n for n in reversed(mesh_chain)
+                             if n is not mesh and n.name == skin.root.name), None)
+                if twin is not None:
+                    print(f"Repointed skin root of '{mesh.name}' to its own "
+                          f"ancestor '{twin.name}'")
+                    skin.root = twin
 
             chains = [ancestry(skin.root)] + [ancestry(b) for b in skin.bones]
             if all(skin.root in chain for chain in chains):
@@ -674,7 +686,8 @@ class Importer:
             self.bone_to_armature[node.source] = root
 
         # send all bones to rest pose
-        root.apply_bone_bind_poses()
+        if not self.authored_rest_pose:
+            root.apply_bone_bind_poses()
         root.apply_skins(keep_skins=True)
 
         # apply updated rest matrices
@@ -697,7 +710,8 @@ class Importer:
 
             # calculate corrected transformation matrix
             t, r, s = decompose(root_bone.matrix_posed)
-            r = nif_utils.snap_rotation(r)
+            if not self.authored_rest_pose:
+                r = nif_utils.snap_rotation(r)
             corrected_matrix = compose(t, r, s)
 
             # only do corrections if they are necessary
