@@ -11,21 +11,16 @@ nif_files = pathlib.Path(nif_folder).glob("*.nif")
 for nif_file in nif_files:
     bpy.ops.import_scene.mw(
         filepath=str(nif_file),
-        use_existing_materials = True,
-        ignore_animations = True, 
-        ignore_armatures = True,
-        ignore_billboard_nodes = True,
-        ignore_particle_nodes = False,      
-        ignore_emissive_color = False,  
-        ignore_tri_shadow = False,
-        ignore_nodes = "",
-        ignore_nodes_under_switches = "OFF, HARVESTED, Closed",
-        filter_best_lod = True,
-        use_texture_fallbacks = True,
-        use_texture_path_in_material_name = False,
-        normalize_prefix = True,
-        normalize_prefix_root = True,
-        normalize_prefix_max_length = 3,
-        always_use_file_name_for_root_name = False,
-        proxy_mode = False
+        use_existing_materials=True,
+        ignore_animations=False,
+        ignore_armatures=False,
+        authored_rest_pose=True,
+        discard_root_transforms=True,
+        preserve_root_scale=True,      # race scale rides in the root matrix
+        ignore_billboard_nodes=True,
+        ignore_collision_nodes=True,
+        ignore_tri_shadow=True,
+        ignore_nodes_under_switches="OFF, HARVESTED, Closed",
+        filter_best_lod=True,
+        use_texture_fallbacks=True,
     )
