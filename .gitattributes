@@ -1,6 +1,9 @@
-# CRLF in every working tree; git still stores LF in the repository.
-# Windows-only game, Windows-only toolchain: CRLF is what every local tool produces by default.
-* text=auto eol=crlf
+# LF in every working tree, matching what git stores in the repository and what
+# the wider MWSE / Blender ecosystem ships (Ashfall and Greatness7/io_scene_mw
+# are LF throughout). One representation everywhere: repo, working tree,
+# deployed mod folder and release archive all agree, so nothing converts at a
+# boundary and a plain diff between them is meaningful.
+* text=auto eol=lf
 *.nif binary
 *.dll binary
 *.7z binary
