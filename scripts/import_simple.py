@@ -23,6 +23,7 @@ for nif_file in nif_files:
         filter_best_lod = True,
         use_texture_fallbacks = True,
         use_texture_path_in_material_name = False,
+        extended_material_names = True,
         normalize_prefix = True,
         normalize_prefix_root = True,
         normalize_prefix_max_length = 3,
