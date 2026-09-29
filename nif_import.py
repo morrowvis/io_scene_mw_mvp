@@ -613,7 +613,13 @@ class SceneNode:
 
     @property
     def name(self):
-        return nif_mvp.sanitize_name(self.source.name, normalize_prefix=(self.importer.normalize_prefix and (self.parent is not None or self.importer.normalize_prefix_root)), normalize_prefix_max_length=self.importer.normalize_prefix_max_length)
+        # Prefix lowercasing is for MESH names only. An ExportCells scene NIF
+        # names light, actor and mesh-less references by their record ID, and
+        # an ID must keep its authored case; mesh paths always carry '.nif'.
+        prefix = (self.importer.normalize_prefix
+                  and (self.parent is not None or self.importer.normalize_prefix_root)
+                  and nif_mvp.is_mesh_name(self.source.name))
+        return nif_mvp.sanitize_name(self.source.name, normalize_prefix=prefix, normalize_prefix_max_length=self.importer.normalize_prefix_max_length)
 
     @property
     def bone_name(self):

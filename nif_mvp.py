@@ -17,6 +17,12 @@ def _normalize_prefix(filename, max_length=3):
     return filename
 
 
+def is_mesh_name(name):
+    # a mesh path ("x\foo.nif"), or a part named after one ("x\foo.nif.000") -
+    # never a record ID, which ExportCells writes bare
+    return isinstance(name, str) and '.nif' in name.lower()
+
+
 def normalize_path(path):
     if not path or not isinstance(path, str):
         return path
