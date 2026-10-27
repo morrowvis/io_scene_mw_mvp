@@ -14,6 +14,7 @@ from es3.utils.math import ID44, compose, decompose
 from . import nif_utils
 from . import nif_shader
 from . import nif_mvp
+from . import nif_stencil
 
 from bpy_extras.io_utils import axis_conversion
 
@@ -70,6 +71,7 @@ class Importer:
         vars(self).update(config)
         self.nodes = {}
         self.materials = {}
+        self.stencil_roles = {}  # shape source -> nif_stencil role
         self.mesh_data = {}
         self.history = collections.defaultdict(set)
         self.armatures = collections.defaultdict(set)
@@ -87,6 +89,7 @@ class Importer:
         nif_mvp.discard_detached_skins(data)
         nif_mvp.repair_scene(data)
         nif_mvp.apply_hierarchy_scales(data)
+        self.stencil_roles = nif_stencil.classify(data)
 
         # fix transforms
         if self.discard_root_transforms:
@@ -1160,6 +1163,8 @@ class Material(SceneNode):
         if ni_wireframe and ni_wireframe.wireframe:
             self.output.display_type = "WIRE"
 
+        stencil_role = self.importer.stencil_roles.get(self.source, nif_stencil.PLAIN)
+
         # Re-Use Materials
         name = self.calc_name_from_textures(ni_texture, ni_alpha)
         if not name:
@@ -1168,7 +1173,16 @@ class Material(SceneNode):
             if ni_material_prop and ni_material_prop.name:
                 name = ni_material_prop.name
 
-        if self.apply_existing_material(name, ni_alpha):
+        # Masks and areas get their own named materials (Unreal assigns them by
+        # the tag); contents and clip keep their names and may share with plain.
+        # Unnamed keeps Blender's default, so the tag still follows " | ".
+        tag = self.stencil_name_tag(stencil_role)
+        if tag and self.importer.extended_material_names:
+            name = f"{name or 'Material'} | stencil:{tag}"
+
+        bl_material = self.apply_existing_material(name, ni_alpha, stencil_role)
+        if bl_material:
+            self.create_stencil_role(bl_material, stencil_role, ni_stencil)
             return
 
         # Merge Duplicates
@@ -1178,6 +1192,7 @@ class Material(SceneNode):
             len(self.source.data.vertex_colors),
             # uv animations are also stored on the material
             self.source.controllers.find_type(nif.NiUVController),
+            stencil_role,
         )
         try:
             bl_prop = self.importer.materials[props_hash]
@@ -1186,10 +1201,13 @@ class Material(SceneNode):
         else:
             # material already exists, reuse it
             self.link_object_material(self.output, bl_prop.material)
+            self.create_stencil_role(bl_prop.material, stencil_role, ni_stencil)
             return
         finally:
             if self.importer.use_existing_materials:
                 bl_prop.material.name = name
+
+        self.create_stencil_role(bl_prop.material, stencil_role, ni_stencil)
 
         # Setup Properties
         if ni_alpha:
@@ -1254,6 +1272,21 @@ class Material(SceneNode):
     def create_stencil_property(self, bl_prop, ni_prop):
         bl_prop.material.use_backface_culling = False
         bl_prop.material.show_transparent_back = True
+
+    @staticmethod
+    def stencil_name_tag(stencil_role):
+        """The material name's `stencil:` code, for the roles that need their own material."""
+        return {nif_stencil.MASK: "m", nif_stencil.AREA: "a"}.get(stencil_role)
+
+    def create_stencil_role(self, bl_material, stencil_role, ni_stencil):
+        # Recorded for later passes (portal clipping). A contents or clip
+        # material may be shared with plain shapes; the object's is per shape.
+        if stencil_role == nif_stencil.PLAIN:
+            return
+        ref = int(ni_stencil.stencil_ref) & 0xFF if ni_stencil else 0
+        for owner in (bl_material, self.output):
+            owner["mw_stencil"] = stencil_role
+            owner["mw_stencil_ref"] = ref
 
     def create_texturing_property_map(self, bl_prop, ni_prop, slot_name):
         try:
@@ -1426,7 +1459,7 @@ class Material(SceneNode):
         # Sanitize the final name to ensure it's safe for Blender
         return nif_mvp.sanitize_name(final_name, normalize_prefix=self.importer.normalize_prefix, normalize_prefix_max_length=self.importer.normalize_prefix_max_length) if final_name else ""
         
-    def apply_existing_material(self, name, ni_alpha):
+    def apply_existing_material(self, name, ni_alpha, stencil_role=nif_stencil.PLAIN):
         """
         Check if a material with the same name and properties already exists
         in the current blend file. If so, use it instead of making a new one.
@@ -1437,6 +1470,8 @@ class Material(SceneNode):
         use_vertex_colors = bool(len(self.source.data.vertex_colors))
         use_alpha_blend = getattr(ni_alpha, "alpha_blending", False)
         use_alpha_clip = getattr(ni_alpha, "alpha_testing", False)
+        # a mask or area never shares with any other shape, even untagged
+        stencil_tag = self.stencil_name_tag(stencil_role)
 
         base_name, index = name, 0
         while True:
@@ -1449,9 +1484,10 @@ class Material(SceneNode):
                 bl_prop.use_vertex_colors == use_vertex_colors
                 and bl_prop.use_alpha_blend == use_alpha_blend
                 and bl_prop.use_alpha_clip == use_alpha_clip
+                and self.stencil_name_tag(bl_prop.material.get("mw_stencil")) == stencil_tag
             ):
                 self.link_object_material(self.output, bl_prop.material)
-                return True
+                return bl_prop.material
 
             index += 1
             name = f"{base_name}.{index:03}"
